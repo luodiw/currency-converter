@@ -1,0 +1,450 @@
+--- < file .//caller.go > ---
+package main
+
+import (
+	"fmt"
+	"os"
+)
+
+type Latest struct {
+	Timestamp int64          `json:"timestamp"`
+	Rates     map[string]any `json:"rates"`
+}
+
+func checkForForce() bool {
+	if len(os.Args) > 1 && (os.Args[1] == "--force" || os.Args[1] == "-f") {
+		return true
+	}
+	return false
+}
+
+func caller(now int64) (map[string]float64, error) {
+	rates := make(map[string]float64)
+
+	cache, cacheErr := useCache(now, checkForForce())
+	if cacheErr == nil {
+		rates = castRateFromLatest(cache)
+		return rates, nil
+	}
+
+	api, apiErr := useApi()
+	if apiErr == nil {
+		rates = castRateFromLatest(api)
+		return rates, nil
+	}
+
+	forcedCache, forcedCacheErr := useCache(now, true)
+	if forcedCacheErr == nil {
+		rates = castRateFromLatest(forcedCache)
+		return rates, nil
+	}
+
+	return rates, forcedCacheErr
+}
+
+func castRateFromLatest(latestData Latest) map[string]float64 {
+	rates := make(map[string]float64)
+
+	for key, value := range latestData.Rates {
+		// Cast `any` type to `float64`
+		rate, ok := value.(float64)
+		if !ok {
+			fmt.Println("Error: Unable to convert rate to float64")
+			os.Exit(1)
+		}
+
+		rates[key] = rate
+	}
+
+	return rates
+}
+
+--- < file .//cache.go > ---
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+    "errors"
+)
+
+
+
+// NOTE: Adapts a "cache agnostic" model for calling data
+//       See: https://github.com/ItsThompson/currency-converter/issues/1
+func useCache(now int64, force bool) (Latest, error) {
+	var latestData Latest
+    fileName := getEnvVar("FILE_NAME")
+
+	cacheExists := checkIfCacheExist(fileName)
+
+	if cacheExists {
+		cacheData := readFromCache()
+		secondsElapsed := now - cacheData.Timestamp
+        cacheExpiry := getIntEnvVar("CACHE_EXPIRY_IN_SECONDS")
+		if force || secondsElapsed <= cacheExpiry {
+			latestData = cacheData
+			return latestData, nil
+		} else {
+			return latestData, errors.New("Cache expired")
+		}
+	} else {
+		return latestData, errors.New("Cache does not exist")
+	}
+}
+
+func checkIfCacheExist(fileName string) bool {
+	_, err := os.Stat(fileName)
+
+	// Check if the file exists
+	if err == nil {
+		return true
+	} else if os.IsNotExist(err) {
+		return false
+	} else {
+		return false
+	}
+}
+
+func readFromCache() Latest {
+	var latest Latest
+    fileName := getEnvVar("FILE_NAME")
+	jsonFile, err := os.Open(fileName)
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer jsonFile.Close()
+	responseData, _ := io.ReadAll(jsonFile)
+
+	json.Unmarshal([]byte(responseData), &latest)
+	return latest
+}
+
+
+func writeToCache(data []byte, fileName string) {
+	err := os.WriteFile(fileName, data, 0644)
+	if err != nil {
+		panic(err)
+	}
+}
+
+
+--- < file .//input_test.go > ---
+package main
+
+import (
+	"testing"
+)
+
+type TestData struct {
+	Inputs []string
+	Output DataInput
+}
+
+func TestEvaluateInput(t *testing.T) {
+	cacheData := readFromCache()
+	rates := castRateFromLatest(cacheData)
+
+	allTestData := []TestData{
+		{
+			Inputs: []string{
+				"5 gbp to SGD", "5 GBP to SGD", "5 gbp TO sgd",
+				"Convert 5 gbp to SGD", "convert 5 GBP to sgd", "CONVERT 5 gbp to sgd",
+				"5 GBP in SGD", "5 gbp In Sgd", "5 GBP IN SGd",
+				"exchange 5 GBP to SGD", "Exchange 5 GBP to SGD", "EXCHANGE 5 GBP to Sgd",
+				"What is the Equivalent of 5 GBP in SGD?", "What is the equivalent of 5 GBP in SGD?", "What is THE EQUIVALANT of 5 GBP in SGD?",
+				"5 GBP to SGD CONVERSION", "5 GBP to sgd conv", "5 gbp to SGd conversion",
+				"How much is 5 gbp in SGD", "How MUHC is 5 gbp in SGD", "How MUCH is 5 gbp in SGD",
+				"5gbp to sgd", "5gbp in sgd", "5gbp in SGD",
+				"5 gbp to sgd hkd usd", "5gbp to sgd hkd usd", "5gbp to SGd HKD USD",
+			},
+			Output: DataInput{Value: 5, CurrencyFrom: "GBP", CurrencyTo: "SGD"},
+		},
+		{
+			Inputs: []string{
+				"25 gbp to SGD", "25 GBP to SGD", "25 gbp TO sgd",
+				"Convert 25 gbp to SGD", "convert 25 GBP to sgd", "CONVERT 25 gbp to sgd",
+				"25 GBP in SGD", "25 gbp In Sgd", "25 GBP IN SGd",
+				"exchange 25 GBP to SGD", "Exchange 25 GBP to SGD", "EXCHANGE 25 GBP to Sgd",
+				"What is the Equivalent of 25 GBP in SGD?", "What is the equivalent of 25 GBP in SGD?", "What is THE EQUIVALANT of 25 GBP in SGD?",
+				"25 GBP to SGD CONVERSION", "25 GBP to sgd conv", "25 gbp to SGd conversion",
+				"How much is 25 gbp in SGD", "How MUHC is 25 gbp in SGD", "How MUCH is 25 gbp in SGD",
+				"25gbp to sgd", "25gbp in sgd", "25gbp in SGD",
+				"25 gbp to sgd hkd usd", "25gbp to sgd hkd usd", "25gbp to SGd HKD USD",
+			},
+			Output: DataInput{Value: 25, CurrencyFrom: "GBP", CurrencyTo: "SGD"},
+		},
+	}
+
+	for _, testData := range allTestData {
+		for _, input := range testData.Inputs {
+			evalOutput := inputWrapper(rates)
+			if testData.Output != evalOutput {
+				t.Errorf(`FAILED: evaluateInput(rates, %v) Expected %v, got %v.`, input, testData.Output, evalOutput)
+			} else {
+				t.Logf(`PASSED: evaluateInput(rates, %v) Returned %v`, input, testData.Output)
+			}
+		}
+	}
+}
+
+--- < file .//input.go > ---
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+type DataInput struct {
+	Value        float64
+	CurrencyFrom string
+	CurrencyTo   string
+}
+
+func getInput() string {
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("> ")
+	rawInput, err := reader.ReadString('\n')
+
+	if err != nil {
+		fmt.Println("Error reading input:", err)
+		return getInput()
+	}
+
+    checkForQuitSequence(rawInput)
+
+	return rawInput
+}
+
+func checkForQuitSequence(input string) {
+    if input == ":q\n" {
+        os.Exit(0)
+    }
+}
+
+func formatInput(input string) []string {
+	var filterAlphanumeric = func(input string) string {
+		var result []rune
+
+		for _, char := range input {
+			if unicode.IsLetter(char) || unicode.IsDigit(char) || unicode.IsSpace(char) {
+				result = append(result, char)
+			}
+		}
+
+		return string(result)
+	}
+
+	var separateIntegerFromNumber = func(input string) []string {
+		var i int
+
+		for i < len(input) && unicode.IsDigit(rune(input[i])) {
+			i++
+		}
+
+		// If the word is completely digits or completely letters
+		if i == 0 || i == len(input) {
+			return []string{input}
+		}
+
+		return []string{input[:i], input[i:]}
+	}
+
+	filteredInput := filterAlphanumeric(input)
+	capitalizedInput := strings.ToUpper(filteredInput)
+	splitInput := strings.Fields(capitalizedInput)
+
+	// Build final input
+	var formattedInput []string
+	for _, word := range splitInput {
+		slice := separateIntegerFromNumber(word)
+		formattedInput = append(formattedInput, slice...)
+	}
+
+	return formattedInput
+}
+
+func inputWrapper(rates map[string]float64) DataInput {
+	var input DataInput
+    rawInput := getInput()
+    formattedInput := formatInput(rawInput)
+
+    for i := 0; i < len(formattedInput); i++ {
+		if input.Value == 0 {
+			val, err := strconv.ParseFloat(formattedInput[i], 64)
+			if err == nil {
+				input.Value = val
+			}
+		}
+		if checkValidCurrency(rates, formattedInput[i]) {
+			currentWord := formattedInput[i]
+			if input.CurrencyFrom == "" {
+				input.CurrencyFrom = currentWord
+			} else if input.CurrencyTo == "" {
+				input.CurrencyTo = currentWord
+			}
+		}
+	}
+
+	// If the user didn't specify value, value is 1
+	if input.Value == 0 {
+		input.Value = 1
+	}
+
+	if input.CurrencyFrom == "" || input.CurrencyTo == "" {
+		// Missing Inputs
+		return inputWrapper(rates)
+	}
+	return input
+}
+
+--- < file .//dotenv.go > ---
+package main
+
+import (
+	"log"
+	"os"
+    "fmt"
+    "strconv"
+
+	"github.com/joho/godotenv"
+)
+
+// REF: https://towardsdatascience.com/use-environment-variable-in-your-next-golang-project-39e17c3aaa66
+// use godot package to load/read the .env file and
+// return the value of the key
+func getEnvVar(key string) string {
+
+	// load .env file
+	err := godotenv.Load(".env")
+
+	if err != nil {
+		log.Fatalf("Error loading .env file")
+	}
+
+	return os.Getenv(key)
+}
+
+func getIntEnvVar(key string) int64 {
+
+    coonvertVal, convErr := strconv.ParseInt(getEnvVar(key), 10, 64)
+    if convErr != nil {
+        fmt.Println(convErr)
+        os.Exit(1)
+    }
+
+    return coonvertVal
+}
+
+--- < file .//api.go > ---
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"log"
+    "errors"
+	"net/http"
+)
+
+// REF: https://tutorialedge.net/golang/consuming-restful-api-with-go/
+func useApi() (Latest, error) {
+    fileName := getEnvVar("FILE_NAME")
+	var apiEndPoint string = "https://openexchangerates.org/api/latest.json?app_id="
+	var appID string = getEnvVar("APP_ID")
+    var result Latest
+	apiEndPoint = apiEndPoint + appID
+
+	response, err := http.Get(apiEndPoint)
+
+	if err != nil {
+		return result, errors.New("Get Request Failed")
+	}
+
+	responseData, err := io.ReadAll(response.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	writeToCache(responseData, fileName)
+
+	json.Unmarshal([]byte(responseData), &result)
+
+	return result, nil
+}
+
+--- < file .//currency.go > ---
+package main
+
+import "math"
+
+func convert(dataInput DataInput, rates map[string]float64) float64 {
+
+	var conversion float64
+    precision := int(getIntEnvVar("PRECISION"))
+
+	var convertFromUsd = func(value float64, targetRate float64) float64 {
+		var convertedValue float64 = value * targetRate
+		return convertedValue
+	}
+
+	if dataInput.CurrencyFrom == "USD" {
+		// Convert Base Currency to Target Currency
+		conversion = convertFromUsd(dataInput.Value, rates[dataInput.CurrencyTo])
+	} else {
+		// Convert Origin Currency to Base Currency and then Convert to Target Currency
+		rateFrom := rates[dataInput.CurrencyFrom]
+		var value float64 = dataInput.Value / rateFrom
+		conversion = convertFromUsd(value, rates[dataInput.CurrencyTo])
+	}
+
+	return math.Round(conversion*(math.Pow10(precision))) / math.Pow10(precision)
+}
+
+func checkValidCurrency(rates map[string]float64, currency string) bool {
+	// Checks if currency string is in array
+	for key := range rates {
+		if currency == key {
+			return true
+		}
+	}
+	return false
+}
+
+--- < file .//main.go > ---
+package main
+
+import (
+	"fmt"
+	"time"
+    "os"
+)
+
+func main() {
+    if checkForForce(){
+        fmt.Println("Conversion is forced to update from API")
+    }
+
+    for true {
+        var now int64 = time.Now().Unix()
+
+        rates,err := caller(now)
+
+        if err != nil {
+            fmt.Println("Error: No currency exchange data found")
+            os.Exit(1)
+        }
+
+        inputData := inputWrapper(rates)
+        fmt.Println(convert(inputData, rates))
+    }
+}
+
